@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prism — Live HTTP Inspector</title>
+<link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon"></div>
+    <h1>PRISM</h1>
+  </div>
+  <div class="status">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Connecting...</span>
+  </div>
+</header>
+
+<nav class="page-nav">
+  <a href="./" class="active">Capture</a>
+  <a href="./diff">Analyze</a>
+  <a href="./transform" class="proxy-only">Rewrite Rules</a>
+  <a href="./settings">Configure</a>
+  <a href="./ws">WebSockets</a>
+  <a href="./route-editor">Routes</a>
+</nav>
+
+<div class="stats">
+  <div class="stat"><strong id="totalCount">0</strong> captured</div>
+  <div class="stat"><strong id="methodBreakdown">-</strong></div>
+  <div class="stat"><strong id="uptime">-</strong> uptime</div>
+  <div class="stat" id="modeStat"></div>
+</div>
+
+<div class="compose-section" id="composeSection">
+  <button class="compose-toggle" id="composeToggle">+ Compose</button>
+  <div class="compose-form">
+    <div class="compose-mode-tabs">
+      <button class="compose-mode-tab active" data-mode="build">Build</button>
+      <button class="compose-mode-tab" data-mode="curl">cURL</button>
+    </div>
+    <div class="compose-pane" id="composeBuildPane">
+      <div class="compose-row">
+        <select id="composeMethod">
+          <option>GET</option>
+          <option>POST</option>
+          <option>PUT</option>
+          <option>PATCH</option>
+          <option>DELETE</option>
+        </select>
+        <input id="composePath" placeholder="/hello" value="/hello">
+        <button class="btn btn-secondary" id="composeRandom">Random</button>
+        <button class="btn btn-primary" id="composeSend">Send</button>
+      </div>
+      <div class="compose-extras">
+        <button class="compose-extras-toggle" id="composeHeadersToggle">+ Headers &amp; Body</button>
+        <div class="compose-extra-field" id="composeHeaders">
+          <textarea id="composeHeadersInput" rows="2" placeholder="Content-Type: application/json&#10;Authorization: Bearer token"></textarea>
+        </div>
+        <div class="compose-extra-field" id="composeBodyGroup">
+          <textarea id="composeBodyInput" rows="2" placeholder='{"hello":"world"}'></textarea>
+        </div>
+      </div>
+    </div>
+    <div class="compose-pane" id="composeCurlPane" style="display:none">
+      <div class="compose-row">
+        <input id="composeCurlInput" class="compose-curl-input" placeholder="curl -X POST http://localhost:4568/api -H 'Content-Type: application/json' -d '{&quot;hello&quot;:&quot;world&quot;}'">
+        <button class="btn btn-secondary" id="composeCurlRandom">Random</button>
+        <button class="btn btn-primary" id="composeCurlSend">Send</button>
+      </div>
+    </div>
+    <div class="compose-result" id="composeResult"></div>
+  </div>
+</div>
+
+<div class="filter-bar">
+  <select id="methodFilter">
+    <option value="">All Methods</option>
+    <option>GET</option>
+    <option>POST</option>
+    <option>PUT</option>
+    <option>PATCH</option>
+    <option>DELETE</option>
+  </select>
+  <input id="statusFilter" class="proxy-only" placeholder="Status (2xx, 404, 5xx)">
+  <input id="pathFilter" placeholder="Path regex">
+  <input id="searchInput" placeholder="Full-text search...">
+  <label><input type="checkbox" id="pinnedOnly"> Pinned only</label>
+  <button id="clearFilters">Clear</button>
+  <span class="filter-spacer"></span>
+  <button class="filter-bar-link" id="selectAllBtn">Select all</button>
+  <span id="selectionInfo" style="display:none">
+    <strong id="selectedCount">0</strong> selected
+    <button class="filter-bar-link" id="bulkDownloadHar">HAR</button>
+    <button class="filter-bar-link" id="bulkDownloadCurl">cURL</button>
+    <button class="filter-bar-link" id="bulkDeselectAll">Deselect</button>
+  </span>
+</div>
+
+<main id="feed">
+  <div class="empty" id="emptyState">
+    <div class="big">&#x25C6;</div>
+    <p>No requests captured yet.</p>
+    <p style="margin-top:0.5rem">Send a request to see it here.</p>
+  </div>
+</main>
+
+<script type="module">
+import { PrismClient } from './shared/prism-client.mjs';
+
+const feed = document.getElementById('feed');
+const emptyState = document.getElementById('emptyState');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const totalCount = document.getElementById('totalCount');
+const methodBreakdown = document.getElementById('methodBreakdown');
+const uptimeEl = document.getElementById('uptime');
+const modeStat = document.getElementById('modeStat');
+
+const methodFilter = document.getElementById('methodFilter');
+const statusFilterEl = document.getElementById('statusFilter');
+const pathFilter = document.getElementById('pathFilter');
+const searchInput = document.getElementById('searchInput');
+const pinnedOnly = document.getElementById('pinnedOnly');
+const clearFiltersBtn = document.getElementById('clearFilters');
+
+const entries = new Map();      // id → entry data
+const entryEls = new Map();     // id → DOM element
+const methodCounts = {};
+let pins = new Set(JSON.parse(localStorage.getItem('prism-pins') || '[]'));
+const selectedIds = new Set();
+
+const basePath = new URL('.', location.href).pathname.replace(/\/$/, '');
+
+const client = new PrismClient(basePath);
+client.onStatusChange = (connected) => {
+  statusDot.classList.toggle('connected', connected);
+  statusText.textContent = connected ? 'Live' : 'Reconnecting...';
+};
+client.onEntry(addEntry);
+client.connect();
+
+// ── Filtering ──────────────────────────────────────────────────
+function matchesFilters(entry) {
+  const mf = methodFilter.value;
+  if (mf && entry.method !== mf) return false;
+
+  const sf = statusFilterEl.value.trim().toLowerCase();
+  if (sf) {
+    if (sf.endsWith('xx')) {
+      const base = parseInt(sf[0], 10) * 100;
+      if (!entry.status || entry.status < base || entry.status >= base + 100) return false;
+    } else {
+      const code = parseInt(sf, 10);
+      if (entry.status !== code) return false;
+    }
+  }
+
+  const pf = pathFilter.value.trim();
+  if (pf) {
+    try { if (!new RegExp(pf, 'i').test(entry.path)) return false; }
+    catch { if (!entry.path.includes(pf)) return false; }
+  }
+
+  const sq = searchInput.value.trim().toLowerCase();
+  if (sq) {
+    const haystack = [
+      entry.path, entry.method,
+      entry.formats?.httpString, entry.formats?.curl,
+      entry.body?.raw, entry.responseBody?.text
+    ].filter(Boolean).join(' ').toLowerCase();
+    if (!haystack.includes(sq)) return false;
+  }
+
+  if (pinnedOnly.checked && !pins.has(entry.id)) return false;
+
+  return true;
+}
+
+function applyFilters() {
+  for (const [id, el] of entryEls) {
+    const entry = entries.get(id);
+    el.style.display = matchesFilters(entry) ? '' : 'none';
+  }
+}
+
+[methodFilter, statusFilterEl, pathFilter, searchInput, pinnedOnly].forEach(el => {
+  el.addEventListener('input', applyFilters);
+  el.addEventListener('change', applyFilters);
+});
+
+clearFiltersBtn.addEventListener('click', () => {
+  methodFilter.value = '';
+  statusFilterEl.value = '';
+  pathFilter.value = '';
+  searchInput.value = '';
+  pinnedOnly.checked = false;
+  applyFilters();
+});
+
+// ── Pin management ──────────────────────────────────────────────
+function togglePin(id, btn) {
+  if (pins.has(id)) {
+    pins.delete(id);
+    btn.classList.remove('pinned');
+    btn.textContent = '\u2606';
+  } else {
+    pins.add(id);
+    btn.classList.add('pinned');
+    btn.textContent = '\u2605';
+  }
+  localStorage.setItem('prism-pins', JSON.stringify([...pins]));
+  applyFilters();
+}
+
+// ── Render an entry ─────────────────────────────────────────────
+function addEntry(entry) {
+  if (entries.has(entry.id)) return;
+  entries.set(entry.id, entry);
+
+  emptyState.style.display = 'none';
+
+  methodCounts[entry.method] = (methodCounts[entry.method] || 0) + 1;
+  totalCount.textContent = entries.size;
+  methodBreakdown.textContent = Object.entries(methodCounts)
+    .map(([m, c]) => `${m}:${c}`)
+    .join('  ');
+
+  const hasStructured = entry.structured && Object.keys(entry.structured).length;
+  const hasResponse = entry.status != null;
+  const hasBody = entry.body && entry.body.type !== 'empty';
+  const hasResBody = entry.responseBody && entry.responseBody.parsed;
+  const hasTimings = entry.timings && entry.timings.total > 0;
+  const hasRL = entry.rateLimit;
+  const isPinned = pins.has(entry.id);
+
+  const el = document.createElement('div');
+  el.className = 'entry';
+  if (!matchesFilters(entry)) el.style.display = 'none';
+
+  let rlBadge = '';
+  if (hasRL) {
+    let rlClass = 'rl-badge';
+    if (hasRL.remaining != null && hasRL.limit != null) {
+      const pct = hasRL.remaining / hasRL.limit;
+      if (pct <= 0 || entry.status === 429) rlClass += ' rl-crit';
+      else if (pct < 0.1) rlClass += ' rl-warn';
+    }
+    const label = hasRL.remaining != null && hasRL.limit != null
+      ? `${hasRL.remaining}/${hasRL.limit}`
+      : 'RL';
+    rlBadge = `<span class="${rlClass}">${label}</span>`;
+  }
+
+  el.innerHTML = `
+    <div class="entry-header" onclick="this.parentElement.classList.toggle('open')">
+      <input type="checkbox" class="entry-select" data-id="${entry.id}" onclick="event.stopPropagation()">
+      <span class="chevron">&#9656;</span>
+      <button class="pin-btn ${isPinned ? 'pinned' : ''}" data-id="${entry.id}" onclick="event.stopPropagation()">${isPinned ? '\u2605' : '\u2606'}</button>
+      <span class="method method-${entry.method}">${entry.method}</span>
+      <span class="path">${esc(entry.path)}</span>
+      ${hasResponse ? `<span class="status-badge ${statusClass(entry.status)}">${entry.status}</span>` : ''}
+      ${rlBadge}
+      <span class="time">${new Date(entry.timestamp).toLocaleTimeString()}</span>
+      <span class="entry-id">#${entry.id}</span>
+      <button class="replay-btn" data-id="${entry.id}" onclick="event.stopPropagation()">Replay</button>
+    </div>
+    <div class="entry-body">
+      <div class="tabs">
+        <button class="tab active" onclick="switchTab(this, 'http')">HTTP</button>
+        <button class="tab" onclick="switchTab(this, 'curl')">cURL</button>
+        <button class="tab" onclick="switchTab(this, 'fetch')">fetch()</button>
+        <button class="tab" onclick="switchTab(this, 'har')">HAR</button>
+        ${hasBody ? '<button class="tab" onclick="switchTab(this, \'body\')">Body</button>' : ''}
+        ${hasStructured ? '<button class="tab" onclick="switchTab(this, \'structured\')">Structured Headers</button>' : ''}
+        ${hasResponse ? '<button class="tab" onclick="switchTab(this, \'response\')">Response</button>' : ''}
+        ${hasResBody ? '<button class="tab" onclick="switchTab(this, \'resbody\')">Response Body</button>' : ''}
+        ${hasTimings ? '<button class="tab" onclick="switchTab(this, \'timing\')">Timing</button>' : ''}
+      </div>
+      <div class="tab-content active" data-tab="http">
+        <div class="code-block">
+          <button class="copy-btn" onclick="copyBlock(this)">Copy</button>
+          <pre>${highlightHTTP(entry.formats.httpString)}</pre>
+        </div>
+      </div>
+      <div class="tab-content" data-tab="curl">
+        <div class="code-block">
+          <button class="copy-btn" onclick="copyBlock(this)">Copy</button>
+          <pre>${highlightCurl(entry.formats.curl)}</pre>
+        </div>
+      </div>
+      <div class="tab-content" data-tab="fetch">
+        <div class="code-block">
+          <button class="copy-btn" onclick="copyBlock(this)">Copy</button>
+          <pre>${highlightJS(entry.formats.fetchCode)}</pre>
+        </div>
+      </div>
+      <div class="tab-content" data-tab="har">
+        <div class="code-block">
+          <button class="copy-btn" onclick="copyBlock(this)">Copy</button>
+          <pre>${esc(JSON.stringify(entry.formats.har, null, 2))}</pre>
+        </div>
+      </div>
+      ${hasBody ? renderBody(entry.body) : ''}
+      ${renderStructured(entry.structured)}
+      ${hasResponse ? renderResponse(entry) : ''}
+      ${hasResBody ? renderResBody(entry.responseBody) : ''}
+      ${hasTimings ? renderTimings(entry.timings) : ''}
+    </div>
+  `;
+
+  // Pin button handler
+  el.querySelector('.pin-btn').addEventListener('click', function() {
+    togglePin(entry.id, this);
+  });
+
+  // Replay button handler
+  el.querySelector('.replay-btn').addEventListener('click', async function() {
+    this.textContent = '...';
+    try {
+      const result = await client.replay(entry.id);
+      this.textContent = result.status || 'Done';
+      setTimeout(() => { this.textContent = 'Replay'; }, 2000);
+    } catch {
+      this.textContent = 'Error';
+      setTimeout(() => { this.textContent = 'Replay'; }, 2000);
+    }
+  });
+
+  // Selection checkbox handler
+  el.querySelector('.entry-select').addEventListener('change', function() {
+    if (this.checked) selectedIds.add(entry.id);
+    else selectedIds.delete(entry.id);
+    updateSelectionUI();
+  });
+
+  feed.insertBefore(el, feed.firstChild);
+  entryEls.set(entry.id, el);
+
+  // Limit DOM entries (skip pinned)
+  while (feed.children.length > 102) {
+    const last = feed.lastChild;
+    if (last === emptyState) break;
+    const lastId = parseInt(last.querySelector?.('.entry-id')?.textContent?.slice(1), 10);
+    if (lastId && pins.has(lastId)) break;
+    feed.removeChild(last);
+    entryEls.delete(lastId);
+  }
+}
+
+// ── Render helpers ─────────────────────────────────────────────
+function renderBody(body) {
+  if (!body || body.type === 'empty') return '';
+  if (body.type === 'form') {
+    const pairs = body.formatted.split('\n');
+    let html = '<div class="tab-content" data-tab="body"><div class="kv-grid">';
+    for (const pair of pairs) {
+      const [k, ...rest] = pair.split(' = ');
+      html += `<span class="kv-key">${esc(k)}</span><span class="kv-val">${esc(rest.join(' = '))}</span>`;
+    }
+    html += '</div></div>';
+    return html;
+  }
+  const lang = body.type === 'json' ? highlightJS : (s => esc(s));
+  return `<div class="tab-content" data-tab="body"><div class="code-block"><button class="copy-btn" onclick="copyBlock(this)">Copy</button><pre>${lang(body.formatted)}</pre></div></div>`;
+}
+
+function renderResBody(resBody) {
+  if (!resBody || !resBody.parsed) return '';
+  const p = resBody.parsed;
+  if (p.type === 'form') {
+    const pairs = p.formatted.split('\n');
+    let html = '<div class="tab-content" data-tab="resbody"><div class="kv-grid">';
+    for (const pair of pairs) {
+      const [k, ...rest] = pair.split(' = ');
+      html += `<span class="kv-key">${esc(k)}</span><span class="kv-val">${esc(rest.join(' = '))}</span>`;
+    }
+    html += '</div></div>';
+    return html;
+  }
+  const lang = p.type === 'json' ? highlightJS : (s => esc(s));
+  let sizeInfo = resBody.truncated ? `<div style="padding:0.5rem 1rem;color:var(--accent3);font-size:0.7rem">[Truncated: ${resBody.size} bytes]</div>` : '';
+  return `<div class="tab-content" data-tab="resbody">${sizeInfo}<div class="code-block"><button class="copy-btn" onclick="copyBlock(this)">Copy</button><pre>${lang(p.formatted)}</pre></div></div>`;
+}
+
+function renderTimings(t) {
+  const max = t.total || 1;
+  const pct = (v) => v > 0 ? Math.max(2, Math.round((v / max) * 200)) : 0;
+  const phases = [
+    { label: 'DNS', key: 'dns', cls: 'dns' },
+    { label: 'Connect', key: 'connect', cls: 'connect' },
+    { label: 'TLS', key: 'tls', cls: 'tls' },
+    { label: 'TTFB', key: 'ttfb', cls: 'ttfb' },
+    { label: 'Transfer', key: 'transfer', cls: 'transfer' },
+  ];
+  let html = '<div class="tab-content" data-tab="timing"><div class="timing-chart">';
+  for (const p of phases) {
+    const v = t[p.key];
+    if (v < 0) continue;
+    html += `<div class="timing-row">
+      <span class="timing-label">${p.label}</span>
+      <div class="timing-bar ${p.cls}" style="width:${pct(v)}px"></div>
+      <span class="timing-value">${v}ms</span>
+    </div>`;
+  }
+  html += `<div class="timing-total">Total: ${t.total}ms</div></div></div>`;
+  return html;
+}
+
+function statusClass(code) {
+  if (code >= 500) return 'status-5xx';
+  if (code >= 400) return 'status-4xx';
+  if (code >= 300) return 'status-3xx';
+  return 'status-2xx';
+}
+
+function renderResponse(entry) {
+  let html = '<div class="tab-content" data-tab="response"><div class="response-info">';
+  html += `<div class="label">Status</div>`;
+  html += `<div><span class="status-badge ${statusClass(entry.status)}">${entry.status}</span> ${esc(entry.statusText || '')}</div>`;
+  if (entry.rateLimit) {
+    html += '<div class="label" style="margin-top:0.75rem">Rate Limit</div>';
+    html += '<div class="response-header-grid">';
+    if (entry.rateLimit.limit != null) html += `<span class="rh-name">Limit</span><span class="rh-val">${entry.rateLimit.limit}</span>`;
+    if (entry.rateLimit.remaining != null) html += `<span class="rh-name">Remaining</span><span class="rh-val">${entry.rateLimit.remaining}</span>`;
+    if (entry.rateLimit.reset) html += `<span class="rh-name">Reset</span><span class="rh-val">${entry.rateLimit.reset}</span>`;
+    if (entry.rateLimit.retryAfter) html += `<span class="rh-name">Retry-After</span><span class="rh-val">${entry.rateLimit.retryAfter}</span>`;
+    html += '</div>';
+  }
+  if (entry.responseHeaders && Object.keys(entry.responseHeaders).length) {
+    html += `<div class="label" style="margin-top:0.75rem">Response Headers</div>`;
+    html += '<div class="response-header-grid">';
+    for (const [name, value] of Object.entries(entry.responseHeaders)) {
+      html += `<span class="rh-name">${esc(name)}</span><span class="rh-val">${esc(value)}</span>`;
+    }
+    html += '</div>';
+  }
+  html += '</div></div>';
+  return html;
+}
+
+function highlightHTTP(str) {
+  if (!str) return '';
+  const lines = esc(str).split('\n');
+  return lines.map((line, i) => {
+    if (i === 0) return line.replace(/^(\S+)\s+(\S+)\s+(HTTP\/\S+)/, '<span class="kw">$1</span> <span class="url">$2</span> <span class="comment">$3</span>');
+    const colon = line.indexOf(':');
+    if (colon > 0 && line.trim()) return '<span class="hdr-name">' + line.slice(0, colon) + '</span>:<span class="hdr-val">' + line.slice(colon + 1) + '</span>';
+    return line;
+  }).join('\n');
+}
+
+function highlightCurl(str) {
+  if (!str) return '';
+  return esc(str)
+    .replace(/^(curl)/m, '<span class="kw">$1</span>')
+    .replace(/(-X\s+)(\w+)/g, '<span class="comment">$1</span><span class="kw">$2</span>')
+    .replace(/(-H\s+)/g, '<span class="comment">$1</span>')
+    .replace(/(--data-raw\s+|--data\s+|--compressed)/g, '<span class="comment">$1</span>')
+    .replace(/'([^']+)'/g, "'<span class=\"str\">$1</span>'");
+}
+
+function highlightJS(str) {
+  if (!str) return '';
+  return esc(str)
+    .replace(/\b(const|await|fetch)\b/g, '<span class="kw">$1</span>')
+    .replace(/'([^']+)'/g, "'<span class=\"str\">$1</span>'");
+}
+
+function renderStructured(structured) {
+  if (!structured || !Object.keys(structured).length) return '';
+  let html = '<div class="tab-content" data-tab="structured"><div class="structured-grid">';
+  for (const [key, val] of Object.entries(structured)) {
+    const display = val && typeof val === 'object' && 'value' in val
+      ? JSON.stringify(val.value, null, 2) + ` (${val.type})`
+      : (typeof val === 'string' ? val : JSON.stringify(val, null, 2));
+    html += `<span class="structured-key">${esc(key)}</span>`;
+    html += `<span class="structured-val">${esc(display)}</span>`;
+  }
+  html += '</div></div>';
+  return html;
+}
+
+// ── Utilities ───────────────────────────────────────────────────
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// Expose global functions for onclick handlers
+window.switchTab = function(btn, tabName) {
+  const body = btn.closest('.entry-body');
+  body.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  body.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  body.querySelector(`[data-tab="${tabName}"]`).classList.add('active');
+};
+
+window.copyBlock = function(btn) {
+  const text = btn.nextElementSibling.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+  });
+};
+
+// ── Compose ─────────────────────────────────────────────────────
+const composeSection = document.getElementById('composeSection');
+const composeToggle = document.getElementById('composeToggle');
+const composeResult = document.getElementById('composeResult');
+
+composeToggle.addEventListener('click', () => {
+  composeSection.classList.toggle('open');
+  composeToggle.textContent = composeSection.classList.contains('open') ? '\u2212 Compose' : '+ Compose';
+});
+
+// Tab switching
+document.querySelectorAll('.compose-mode-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.compose-mode-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('composeBuildPane').style.display = tab.dataset.mode === 'build' ? '' : 'none';
+    document.getElementById('composeCurlPane').style.display = tab.dataset.mode === 'curl' ? '' : 'none';
+    composeResult.innerHTML = '';
+  });
+});
+
+// ── Selection & bulk actions ─────────────────────────────────────
+const selectionInfo = document.getElementById('selectionInfo');
+const selectedCountEl = document.getElementById('selectedCount');
+const selectAllBtn = document.getElementById('selectAllBtn');
+
+function updateSelectionUI() {
+  const count = selectedIds.size;
+  if (count > 0) {
+    selectionInfo.style.display = '';
+    selectedCountEl.textContent = count;
+    selectAllBtn.textContent = 'Select all';
+  } else {
+    selectionInfo.style.display = 'none';
+    selectAllBtn.textContent = 'Select all';
+  }
+}
+
+selectAllBtn.addEventListener('click', () => {
+  for (const [id, el] of entryEls) {
+    if (el.style.display !== 'none') {
+      selectedIds.add(id);
+      const cb = el.querySelector('.entry-select');
+      if (cb) cb.checked = true;
+    }
+  }
+  updateSelectionUI();
+});
+
+document.getElementById('bulkDeselectAll').addEventListener('click', () => {
+  selectedIds.clear();
+  document.querySelectorAll('.entry-select').forEach(cb => cb.checked = false);
+  updateSelectionUI();
+});
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+document.getElementById('bulkDownloadHar').addEventListener('click', () => {
+  const selected = [...selectedIds].map(id => entries.get(id)).filter(Boolean);
+  if (!selected.length) return;
+  const har = {
+    log: {
+      version: '1.2',
+      creator: { name: 'Prism', version: '0.1.0' },
+      entries: selected.map(e => e.formats.har),
+    }
+  };
+  const blob = new Blob([JSON.stringify(har, null, 2)], { type: 'application/json' });
+  downloadBlob(blob, 'prism-export.har');
+});
+
+document.getElementById('bulkDownloadCurl').addEventListener('click', () => {
+  const selected = [...selectedIds].map(id => entries.get(id)).filter(Boolean);
+  if (!selected.length) return;
+  const text = selected.map(e => `# ${e.method} ${e.path} [#${e.id}]\n${e.formats.curl}`).join('\n\n');
+  const blob = new Blob([text], { type: 'text/x-shellscript' });
+  downloadBlob(blob, 'prism-export.sh');
+});
+
+// Build mode
+const composeMethod = document.getElementById('composeMethod');
+const composePath = document.getElementById('composePath');
+const composeHeadersToggle = document.getElementById('composeHeadersToggle');
+const composeHeadersDiv = document.getElementById('composeHeaders');
+const composeHeadersInput = document.getElementById('composeHeadersInput');
+const composeBodyGroup = document.getElementById('composeBodyGroup');
+const composeBodyInput = document.getElementById('composeBodyInput');
+const composeSend = document.getElementById('composeSend');
+const composeRandom = document.getElementById('composeRandom');
+const composeCurlInput = document.getElementById('composeCurlInput');
+const composeCurlSend = document.getElementById('composeCurlSend');
+
+// ── Random request generator (inline, mirrors http-converter/random) ──
+const _randomPaths = [
+  '/api/users', '/api/users/:id', '/api/users/:id/profile',
+  '/api/posts', '/api/posts/:id', '/api/posts/:id/comments',
+  '/api/auth/login', '/api/auth/logout', '/api/auth/refresh',
+  '/api/search', '/api/products', '/api/products/:id',
+  '/api/orders', '/api/orders/:id', '/health', '/api/config',
+  '/api/events', '/api/upload', '/api/notifications',
+  '/api/teams/:id/members', '/api/tags', '/webhook/stripe',
+  '/api/v2/items', '/graphql',
+];
+const _randomHeaderPool = [
+  ['Content-Type', 'application/json'],
+  ['Authorization', 'Bearer eyJhbGciOiJIUzI1NiJ9.example'],
+  ['Accept', 'application/json'],
+  ['X-Request-Id', () => crypto.randomUUID()],
+  ['X-Api-Key', 'sk_test_' + Math.random().toString(36).slice(2, 14)],
+  ['Cache-Control', 'no-cache'],
+  ['Accept-Language', 'en-US,en;q=0.9'],
+  ['X-Forwarded-For', () => Array.from({length:4}, () => Math.floor(Math.random()*256)).join('.')],
+];
+const _randomBodies = [
+  '{"name":"Alice","email":"alice@example.com"}',
+  '{"title":"New Post","body":"Lorem ipsum dolor sit amet."}',
+  '{"username":"admin","password":"hunter2"}',
+  '{"query":"{ users { id name } }"}',
+  '{"items":[{"id":1,"qty":2},{"id":3,"qty":1}]}',
+  '{"status":"active","role":"editor"}',
+  '{"message":"Hello, world!"}',
+  '{"filters":{"price":{"min":10,"max":100},"inStock":true}}',
+];
+
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+function generateRandomRequest() {
+  const methods = ['GET','GET','GET','GET','POST','POST','POST','PUT','PUT','PATCH','DELETE'];
+  const method = pick(methods);
+  const path = pick(_randomPaths).replace(/:id/g, () => String(Math.floor(Math.random() * 9000) + 1000));
+
+  const numHeaders = 1 + Math.floor(Math.random() * 3);
+  const chosen = [];
+  const pool = [..._randomHeaderPool];
+  for (let i = 0; i < numHeaders && pool.length; i++) {
+    const idx = Math.floor(Math.random() * pool.length);
+    const [k, v] = pool.splice(idx, 1)[0];
+    chosen.push(`${k}: ${typeof v === 'function' ? v() : v}`);
+  }
+  const headersStr = chosen.join('\n');
+
+  let body = '';
+  if (method !== 'GET' && method !== 'HEAD') {
+    body = pick(_randomBodies);
+  }
+
+  return { method, path, headersStr, body };
+}
+
+// ── Inline curl helpers (simplified, no external deps) ──────────
+function buildCurlFromRequest(method, path, headersStr, body) {
+  const parts = ['curl'];
+  if (method !== 'GET') parts.push('-X', method);
+  parts.push(quoteShellArg(basePath + path));
+  if (headersStr.trim()) {
+    headersStr.trim().split('\n').forEach(line => {
+      const trimmed = line.trim();
+      if (trimmed) parts.push('-H', quoteShellArg(trimmed));
+    });
+  }
+  if (body) {
+    parts.push('-d', quoteShellArg(body));
+  }
+  return parts.join(' ');
+}
+
+function quoteShellArg(s) {
+  if (/[\s"'`$\\!*?#&;<>()[\]{}|~]/.test(s)) {
+    return "'" + s.replace(/'/g, "'\\''") + "'";
+  }
+  return s;
+}
+
+function parseCurlToRequest(cmd) {
+  const result = { method: 'GET', path: '/', headersStr: '', body: '' };
+  if (!cmd || !cmd.trim()) return result;
+  // Tokenize respecting quotes
+  const tokens = [];
+  const regex = /(?:[^\s"']+|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')+/g;
+  let m;
+  while ((m = regex.exec(cmd)) !== null) {
+    let tok = m[0];
+    if (tok === 'curl' && tokens.length === 0) continue;
+    if ((tok.startsWith('"') && tok.endsWith('"')) || (tok.startsWith("'") && tok.endsWith("'"))) {
+      tok = tok.slice(1, -1).replace(/\\"/g, '"').replace(/\\'/g, "'");
+    }
+    tokens.push(tok);
+  }
+  const headers = [];
+  let i = 0;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (t === '-X' || t === '--request') { result.method = tokens[++i]; }
+    else if (t === '-H' || t === '--header') { headers.push(tokens[++i]); }
+    else if (t === '-d' || t === '--data' || t === '--data-raw' || t === '--data-binary') {
+      result.body = tokens[++i] || '';
+      if (result.method === 'GET') result.method = 'POST';
+    }
+    else if (!t.startsWith('-') && result.path === '/') {
+      // Extract path from URL
+      try {
+        const u = new URL(t, 'http://localhost');
+        result.path = u.pathname + u.search;
+      } catch {
+        result.path = t;
+      }
+    }
+    i++;
+  }
+  result.headersStr = headers.join('\n');
+  return result;
+}
+
+// ── Sync logic ──────────────────────────────────────────────────
+let syncing = false;
+
+function syncBuildToCurl() {
+  if (syncing) return;
+  syncing = true;
+  const method = composeMethod.value;
+  const path = composePath.value.trim() || '/';
+  const headersStr = composeHeadersDiv.classList.contains('open') ? composeHeadersInput.value : '';
+  const body = composeBodyGroup.classList.contains('open') ? composeBodyInput.value : '';
+  composeCurlInput.value = buildCurlFromRequest(method, path, headersStr, body);
+  syncing = false;
+}
+
+function syncCurlToBuild() {
+  if (syncing) return;
+  syncing = true;
+  const parsed = parseCurlToRequest(composeCurlInput.value);
+  composeMethod.value = parsed.method;
+  composePath.value = parsed.path;
+
+  if (parsed.headersStr || parsed.body) {
+    composeHeadersDiv.classList.add('open');
+    composeHeadersToggle.textContent = '\u2212 Headers & Body';
+    composeHeadersInput.value = parsed.headersStr;
+  }
+  if (parsed.body) {
+    composeBodyGroup.classList.add('open');
+    composeBodyInput.value = parsed.body;
+  } else {
+    composeBodyGroup.classList.remove('open');
+    composeBodyInput.value = '';
+  }
+  syncing = false;
+}
+
+// Sync Build → cURL on field changes
+[composeMethod, composePath].forEach(el => {
+  el.addEventListener('input', syncBuildToCurl);
+  el.addEventListener('change', syncBuildToCurl);
+});
+composeHeadersInput.addEventListener('input', syncBuildToCurl);
+composeBodyInput.addEventListener('input', syncBuildToCurl);
+
+// Sync cURL → Build on cURL input changes
+composeCurlInput.addEventListener('input', syncCurlToBuild);
+
+// ── Randomize (shared by both panes) ────────────────────────────
+function randomize() {
+  const { method, path, headersStr, body } = generateRandomRequest();
+  composeMethod.value = method;
+  composePath.value = path;
+
+  composeHeadersDiv.classList.add('open');
+  composeHeadersToggle.textContent = '\u2212 Headers & Body';
+  composeHeadersInput.value = headersStr;
+
+  if (body) {
+    composeBodyGroup.classList.add('open');
+    composeBodyInput.value = body;
+  } else {
+    composeBodyGroup.classList.remove('open');
+    composeBodyInput.value = '';
+  }
+
+  syncBuildToCurl();
+}
+
+composeRandom.addEventListener('click', randomize);
+document.getElementById('composeCurlRandom').addEventListener('click', randomize);
+
+composeHeadersToggle.addEventListener('click', () => {
+  const show = !composeHeadersDiv.classList.contains('open');
+  composeHeadersDiv.classList.toggle('open', show);
+  composeHeadersToggle.textContent = show ? '\u2212 Headers & Body' : '+ Headers & Body';
+  const m = composeMethod.value;
+  composeBodyGroup.classList.toggle('open', show && m !== 'GET' && m !== 'HEAD');
+  syncBuildToCurl();
+});
+
+composeMethod.addEventListener('change', () => {
+  const m = composeMethod.value;
+  if (composeHeadersDiv.classList.contains('open')) {
+    composeBodyGroup.classList.toggle('open', m !== 'GET' && m !== 'HEAD');
+  }
+  syncBuildToCurl();
+});
+
+composeSend.addEventListener('click', async () => {
+  const method = composeMethod.value;
+  const path = composePath.value.trim() || '/';
+  const hdrs = {};
+  if (composeHeadersDiv.classList.contains('open') && composeHeadersInput.value.trim()) {
+    composeHeadersInput.value.trim().split('\n').forEach(line => {
+      const colon = line.indexOf(':');
+      if (colon > 0) hdrs[line.slice(0, colon).trim()] = line.slice(colon + 1).trim();
+    });
+  }
+  const body = composeBodyGroup.classList.contains('open') ? composeBodyInput.value : undefined;
+
+  composeSend.disabled = true;
+  composeSend.textContent = '...';
+  composeResult.innerHTML = '';
+  try {
+    const opts = { method, headers: hdrs };
+    if (body !== undefined && body !== '') opts.body = body;
+    const res = await fetch(basePath + path, opts);
+    composeResult.innerHTML = `<div class="msg msg-success">${method} ${esc(path)} \u2014 ${res.status}</div>`;
+  } catch (e) {
+    composeResult.innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`;
+  }
+  composeSend.disabled = false;
+  composeSend.textContent = 'Send';
+});
+
+// cURL mode send
+composeCurlSend.addEventListener('click', async () => {
+  const cmd = composeCurlInput.value.trim();
+  if (!cmd) return;
+  composeCurlSend.disabled = true;
+  composeCurlSend.textContent = '...';
+  composeResult.innerHTML = '';
+  try {
+    const result = await client.importCurl(cmd);
+    if (result.error) {
+      composeResult.innerHTML = `<div class="msg msg-error">${esc(result.error)}</div>`;
+    } else {
+      composeResult.innerHTML = `<div class="msg msg-success">Captured #${result.id}: ${result.method} ${esc(result.path)}</div>`;
+    }
+  } catch (e) {
+    composeResult.innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`;
+  }
+  composeCurlSend.disabled = false;
+  composeCurlSend.textContent = 'Import & Send';
+});
+
+// ── Uptime ticker ───────────────────────────────────────────────
+async function updateUptime() {
+  try {
+    const data = await client.fetchHealth();
+    const s = Math.floor(data.uptime);
+    const m = Math.floor(s / 60);
+    const h = Math.floor(m / 60);
+    if (h > 0) uptimeEl.textContent = `${h}h ${m % 60}m`;
+    else if (m > 0) uptimeEl.textContent = `${m}m ${s % 60}s`;
+    else uptimeEl.textContent = `${s}s`;
+    if (data.mode) {
+      modeStat.innerHTML = `<strong>${data.mode}</strong> mode`;
+      document.body.dataset.mode = data.mode;
+    }
+  } catch {}
+}
+setInterval(updateUptime, 5000);
+updateUptime();
+</script>
+</body>
+</html>

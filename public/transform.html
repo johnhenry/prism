@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prism — Rewrite Rules</title>
+<link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon"></div>
+    <h1>PRISM</h1>
+  </div>
+  <div class="status">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Connecting...</span>
+  </div>
+</header>
+
+<nav class="page-nav">
+  <a href="./">Capture</a>
+  <a href="./diff">Analyze</a>
+  <a href="./transform" class="proxy-only active">Rewrite Rules</a>
+  <a href="./settings">Configure</a>
+  <a href="./ws">WebSockets</a>
+  <a href="./route-editor">Routes</a>
+</nav>
+
+<div class="page-content">
+  <h2>Rewrite Rules</h2>
+  <p style="color:var(--dim);font-size:0.75rem;margin-bottom:1rem">Rules modify proxied requests and responses. Match by path prefix and/or method.</p>
+
+  <table class="data-table" id="rulesTable">
+    <thead>
+      <tr><th>Match</th><th>Action</th><th></th></tr>
+    </thead>
+    <tbody id="rulesBody">
+      <tr id="noRules"><td colspan="3" style="color:var(--dim);text-align:center;padding:1.5rem">No rules configured</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Add Rule</h3>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem">
+    <div class="form-group">
+      <label>Match Path (prefix or /regex/)</label>
+      <input id="rulePath" placeholder="/api">
+    </div>
+    <div class="form-group">
+      <label>Match Method (optional)</label>
+      <select id="ruleMethod">
+        <option value="">Any</option>
+        <option>GET</option>
+        <option>POST</option>
+        <option>PUT</option>
+        <option>PATCH</option>
+        <option>DELETE</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Set Header (name:value, one per line)</label>
+      <textarea id="ruleSetHeader" rows="3" placeholder="x-custom: value&#10;x-other: value2"></textarea>
+    </div>
+    <div class="form-group">
+      <label>Remove Headers (one per line)</label>
+      <textarea id="ruleRemoveHeader" rows="3" placeholder="cookie&#10;authorization"></textarea>
+    </div>
+    <div class="form-group">
+      <label>Rewrite Path (optional)</label>
+      <input id="ruleRewritePath" placeholder="/new-path">
+    </div>
+    <div class="form-group">
+      <label>Set Response Status (optional)</label>
+      <input id="ruleSetStatus" type="number" placeholder="200">
+    </div>
+  </div>
+  <button class="btn btn-primary" id="addRuleBtn">Add Rule</button>
+  <div id="ruleMsg" style="margin-top:0.75rem"></div>
+</div>
+
+<script type="module">
+import { PrismClient } from './shared/prism-client.mjs';
+
+const basePath = new URL('.', location.href).pathname.replace(/\/$/, '');
+const client = new PrismClient(basePath);
+
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ── Init: health check + mode ───────────────────────────────────
+async function init() {
+  try {
+    const health = await client.fetchHealth();
+    statusDot.classList.add('connected');
+    statusText.textContent = 'Live';
+    if (health.mode) document.body.dataset.mode = health.mode;
+  } catch {
+    statusDot.classList.remove('connected');
+    statusText.textContent = 'Offline';
+  }
+}
+init();
+
+// ── Rewrite Rules ───────────────────────────────────────────────
+async function loadRules() {
+  try {
+    const rules = await client.getRules();
+    const tbody = document.getElementById('rulesBody');
+    if (!rules.length) {
+      tbody.innerHTML = '<tr><td colspan="3" style="color:var(--dim);text-align:center;padding:1.5rem">No rules configured</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rules.map(r => {
+      const matchParts = [];
+      if (r.match?.method) matchParts.push(r.match.method);
+      if (r.match?.path) matchParts.push(r.match.path);
+      const match = matchParts.join(' ') || 'all';
+
+      const actionParts = [];
+      if (r.action?.setHeader) actionParts.push('Set: ' + Object.entries(r.action.setHeader).map(([k,v]) => `${k}:${v}`).join(', '));
+      if (r.action?.removeHeader?.length) actionParts.push('Remove: ' + r.action.removeHeader.join(', '));
+      if (r.action?.rewritePath) actionParts.push('Rewrite: ' + r.action.rewritePath);
+      if (r.action?.setStatus) actionParts.push('Status: ' + r.action.setStatus);
+      const action = actionParts.join('; ') || 'none';
+
+      return `<tr>
+        <td>${esc(match)}</td>
+        <td>${esc(action)}</td>
+        <td><button class="btn btn-danger" onclick="deleteRule(${r.index})" style="padding:0.2rem 0.5rem;font-size:0.65rem">Delete</button></td>
+      </tr>`;
+    }).join('');
+  } catch {}
+}
+
+window.deleteRule = async function(index) {
+  await client.deleteRule(index);
+  loadRules();
+};
+
+document.getElementById('addRuleBtn').addEventListener('click', async () => {
+  const path = document.getElementById('rulePath').value.trim();
+  const method = document.getElementById('ruleMethod').value;
+  const setHeaderText = document.getElementById('ruleSetHeader').value.trim();
+  const removeHeaderText = document.getElementById('ruleRemoveHeader').value.trim();
+  const rewritePath = document.getElementById('ruleRewritePath').value.trim();
+  const setStatusText = document.getElementById('ruleSetStatus').value.trim();
+
+  const rule = { match: {}, action: {} };
+  if (path) rule.match.path = path;
+  if (method) rule.match.method = method;
+
+  if (setHeaderText) {
+    rule.action.setHeader = {};
+    setHeaderText.split('\n').forEach(line => {
+      const colon = line.indexOf(':');
+      if (colon > 0) {
+        rule.action.setHeader[line.slice(0, colon).trim()] = line.slice(colon + 1).trim();
+      }
+    });
+  }
+
+  if (removeHeaderText) {
+    rule.action.removeHeader = removeHeaderText.split('\n').map(l => l.trim()).filter(Boolean);
+  }
+
+  if (rewritePath) rule.action.rewritePath = rewritePath;
+  if (setStatusText) rule.action.setStatus = parseInt(setStatusText, 10);
+
+  const ruleMsg = document.getElementById('ruleMsg');
+  try {
+    await client.addRule(rule);
+    ruleMsg.innerHTML = '<div class="msg msg-success">Rule added</div>';
+    loadRules();
+    document.getElementById('rulePath').value = '';
+    document.getElementById('ruleMethod').value = '';
+    document.getElementById('ruleSetHeader').value = '';
+    document.getElementById('ruleRemoveHeader').value = '';
+    document.getElementById('ruleRewritePath').value = '';
+    document.getElementById('ruleSetStatus').value = '';
+  } catch (e) {
+    ruleMsg.innerHTML = `<div class="msg msg-error">${esc(e.message)}</div>`;
+  }
+  setTimeout(() => ruleMsg.innerHTML = '', 3000);
+});
+
+loadRules();
+</script>
+</body>
+</html>

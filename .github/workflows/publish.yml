@@ -1,0 +1,27 @@
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+  push:
+    # Redundant with the release trigger above -- see fileable's
+    # publish.yml / johnhenry/workflows' README for the full incident
+    # writeup: creating a release very soon after a push/merge to the
+    # same commit can silently drop the release event for a job whose
+    # body is uses: <external-repo>/...@v1. This gives a second,
+    # idempotency-safe chance to fire.
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+jobs:
+  publish:
+    permissions:
+      contents: read
+      id-token: write # required by the reusable workflow's provenance step --
+        # see johnhenry/workflows' README for why this must be declared here too.
+    uses: johnhenry/workflows/.github/workflows/npm-publish.yml@v1
+    with:
+      node-version: "26"
+      gate-commands: npm test
+    secrets: inherit

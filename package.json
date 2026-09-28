@@ -1,0 +1,55 @@
+{
+  "name": "@johnhenry/prism",
+  "version": "0.0.0",
+  "description": "Live HTTP request inspector and debugging proxy, with a real-time web dashboard.",
+  "type": "module",
+  "main": "server.mjs",
+  "bin": {
+    "prism": "cli.mjs"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "test": "node --test test/"
+  },
+  "files": [
+    "server.mjs",
+    "inspector.mjs",
+    "cli.mjs",
+    "storage.mjs",
+    "route-storage.mjs",
+    "timed-fetch.mjs",
+    "ws-proxy.mjs",
+    "injected-console.mjs",
+    "public/"
+  ],
+  "keywords": [
+    "http",
+    "proxy",
+    "inspector",
+    "debugging",
+    "devtools",
+    "webhook"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johnhenry/prism.git"
+  },
+  "homepage": "https://opensource.johnhenry.me/prism/",
+  "engines": {
+    "node": ">=26.0.0"
+  },
+  "dependencies": {
+    "@johnhenry/leserve": "^0.0.1",
+    "@johnhenry/letterpress": "^0.0.3",
+    "@johnhenry/signalle": "^0.1.2",
+    "@johnhenry/http-converter": "^0.0.1",
+    "@johnhenry/http-fields": "^0.0.0",
+    "@johnhenry/packfile": "^0.0.1",
+    "@johnhenry/andbox": "^0.0.3",
+    "@johnhenry/webwire": "^0.0.0",
+    "ws": "^8.18.0"
+  }
+}

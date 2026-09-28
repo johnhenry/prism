@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prism — WebSockets</title>
+<link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon"></div>
+    <h1>PRISM</h1>
+  </div>
+  <div class="status">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Connecting...</span>
+  </div>
+</header>
+
+<nav class="page-nav">
+  <a href="./">Capture</a>
+  <a href="./diff">Analyze</a>
+  <a href="./transform" class="proxy-only">Rewrite Rules</a>
+  <a href="./settings">Configure</a>
+  <a href="./ws" class="active">WebSockets</a>
+  <a href="./route-editor">Routes</a>
+</nav>
+
+<div class="page-content">
+  <h2>WebSocket Connections</h2>
+  <p style="color:var(--dim);font-size:0.75rem;margin-bottom:1rem">Live WebSocket frames captured through the proxy.</p>
+
+  <table class="data-table" id="wsTable">
+    <thead>
+      <tr>
+        <th>Conn</th>
+        <th>Direction</th>
+        <th>Type</th>
+        <th>Data</th>
+        <th>Time</th>
+      </tr>
+    </thead>
+    <tbody id="wsBody">
+      <tr id="noWs"><td colspan="5" style="color:var(--dim);text-align:center;padding:2rem">No WebSocket frames captured yet. Connect a WebSocket client through the proxy to see frames.</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script type="module">
+const basePath = new URL('.', location.href).pathname.replace(/\/$/, '');
+
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const wsBody = document.getElementById('wsBody');
+const noWs = document.getElementById('noWs');
+
+let hasFrames = false;
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function addFrame(frame) {
+  if (!hasFrames) {
+    noWs.style.display = 'none';
+    hasFrames = true;
+  }
+  const dirClass = frame.direction.includes('\u2192') || frame.direction.includes('server')
+    ? 'ws-dir-out' : 'ws-dir-in';
+  const tr = document.createElement('tr');
+  tr.className = 'ws-frame';
+  tr.innerHTML = `
+    <td>#${frame.connId}</td>
+    <td class="${dirClass}">${esc(frame.direction)}</td>
+    <td>${frame.type}</td>
+    <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(frame.data?.slice(0, 200))}</td>
+    <td style="color:var(--dim)">${new Date(frame.timestamp).toLocaleTimeString()}</td>
+  `;
+  wsBody.appendChild(tr);
+
+  // Limit rows
+  while (wsBody.children.length > 500) {
+    wsBody.removeChild(wsBody.firstChild);
+  }
+}
+
+// SSE for WebSocket events
+const es = new EventSource(basePath + '/events/ws');
+
+es.addEventListener('ws', (e) => {
+  try {
+    const data = JSON.parse(e.data);
+    if (data.connections) {
+      data.connections.forEach(addFrame);
+    }
+  } catch {}
+});
+
+es.onopen = () => {
+  statusDot.classList.add('connected');
+  statusText.textContent = 'Live';
+};
+
+es.onerror = () => {
+  statusDot.classList.remove('connected');
+  statusText.textContent = 'Reconnecting...';
+};
+
+// Set mode on body for proxy-only hiding
+fetch(basePath + '/health').then(r => r.json()).then(data => {
+  if (data.mode) document.body.dataset.mode = data.mode;
+}).catch(() => {});
+</script>
+</body>
+</html>

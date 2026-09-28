@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prism — Analyze</title>
+<link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon"></div>
+    <h1>PRISM</h1>
+  </div>
+  <div class="status">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Connecting...</span>
+  </div>
+</header>
+
+<nav class="page-nav">
+  <a href="./">Capture</a>
+  <a href="./diff" class="active">Analyze</a>
+  <a href="./transform" class="proxy-only">Rewrite Rules</a>
+  <a href="./settings">Configure</a>
+  <a href="./ws">WebSockets</a>
+  <a href="./route-editor">Routes</a>
+</nav>
+
+<div class="page-content">
+  <h2>Request Diff</h2>
+
+  <div style="margin-bottom:1rem;display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+    <label style="font-size:0.7rem;color:var(--dim)">Format:</label>
+    <select id="diffFormat" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:0.25rem 0.5rem;border-radius:4px;font-family:inherit;font-size:0.7rem">
+      <option value="httpString">HTTP</option>
+      <option value="curl">cURL</option>
+      <option value="fetchCode">fetch()</option>
+    </select>
+  </div>
+
+  <div class="diff-container">
+    <div class="diff-panel">
+      <div class="diff-panel-header">
+        <span>A:</span>
+        <select id="selectA"><option value="">Select entry...</option></select>
+      </div>
+      <div class="diff-content" id="diffA"></div>
+    </div>
+    <div class="diff-panel">
+      <div class="diff-panel-header">
+        <span>B:</span>
+        <select id="selectB"><option value="">Select entry...</option></select>
+      </div>
+      <div class="diff-content" id="diffB"></div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { PrismClient } from './shared/prism-client.mjs';
+import { diff } from './shared/diff.mjs';
+
+const basePath = new URL('.', location.href).pathname.replace(/\/$/, '');
+const client = new PrismClient(basePath);
+
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const selectA = document.getElementById('selectA');
+const selectB = document.getElementById('selectB');
+const diffA = document.getElementById('diffA');
+const diffB = document.getElementById('diffB');
+const diffFormat = document.getElementById('diffFormat');
+
+// No SSE needed — just poll health for status dot
+async function checkStatus() {
+  try {
+    const health = await client.fetchHealth();
+    statusDot.classList.add('connected');
+    statusText.textContent = 'Live';
+    if (health.mode) document.body.dataset.mode = health.mode;
+  } catch {
+    statusDot.classList.remove('connected');
+    statusText.textContent = 'Offline';
+  }
+}
+checkStatus();
+
+// Cache for full entries fetched on demand
+const entryCache = {};
+
+async function loadEntries() {
+  try {
+    // Lightweight: only id/method/path/status/timestamp
+    const summary = await client.fetchSummary();
+    summary.forEach(e => {
+      const label = `#${e.id} ${e.method} ${e.path}`;
+      selectA.appendChild(new Option(label, e.id));
+      selectB.appendChild(new Option(label, e.id));
+    });
+  } catch {}
+}
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+async function renderDiff() {
+  const idA = selectA.value;
+  const idB = selectB.value;
+  if (!idA || !idB) {
+    diffA.innerHTML = '<span style="color:var(--dim)">Select an entry</span>';
+    diffB.innerHTML = '<span style="color:var(--dim)">Select an entry</span>';
+    return;
+  }
+
+  diffA.innerHTML = diffB.innerHTML = '<span style="color:var(--dim)">Loading...</span>';
+
+  // Fetch full entries on demand (cached)
+  if (!entryCache[idA]) entryCache[idA] = await client.fetchEntry(idA);
+  if (!entryCache[idB]) entryCache[idB] = await client.fetchEntry(idB);
+
+  const entryA = entryCache[idA];
+  const entryB = entryCache[idB];
+  const fmt = diffFormat.value;
+  const textA = entryA?.formats?.[fmt] || '';
+  const textB = entryB?.formats?.[fmt] || '';
+
+  if (!textA && !textB) {
+    diffA.innerHTML = diffB.innerHTML = '<span style="color:var(--dim)">No data</span>';
+    return;
+  }
+
+  const result = diff(textA, textB);
+
+  let htmlA = '', htmlB = '';
+  for (const line of result) {
+    if (line.type === 'same') {
+      htmlA += `<div class="diff-line-same">${esc(line.line)}</div>`;
+      htmlB += `<div class="diff-line-same">${esc(line.line)}</div>`;
+    } else if (line.type === 'removed') {
+      htmlA += `<div class="diff-line-removed">${esc(line.line)}</div>`;
+      htmlB += `<div class="diff-line-same" style="visibility:hidden">&nbsp;</div>`;
+    } else {
+      htmlA += `<div class="diff-line-same" style="visibility:hidden">&nbsp;</div>`;
+      htmlB += `<div class="diff-line-added">${esc(line.line)}</div>`;
+    }
+  }
+  diffA.innerHTML = htmlA;
+  diffB.innerHTML = htmlB;
+}
+
+selectA.addEventListener('change', renderDiff);
+selectB.addEventListener('change', renderDiff);
+diffFormat.addEventListener('change', renderDiff);
+
+loadEntries();
+</script>
+</body>
+</html>

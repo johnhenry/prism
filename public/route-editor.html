@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prism — Routes</title>
+<link rel="stylesheet" href="shared/styles.css">
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon"></div>
+    <h1>PRISM</h1>
+  </div>
+  <div class="status">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Connecting...</span>
+  </div>
+</header>
+
+<nav class="page-nav">
+  <a href="./">Capture</a>
+  <a href="./diff">Analyze</a>
+  <a href="./transform" class="proxy-only">Rewrite Rules</a>
+  <a href="./settings">Configure</a>
+  <a href="./ws">WebSockets</a>
+  <a href="./route-editor" class="active">Routes</a>
+</nav>
+
+<div class="page-content">
+  <h2>Programmable Routes</h2>
+  <p style="color:var(--dim);font-size:0.75rem;margin-bottom:1rem">Define routes that respond with evaluated JavaScript or serve static files. Matched routes take priority over proxy/echo.</p>
+
+  <table class="data-table" id="routesTable">
+    <thead>
+      <tr><th>Name</th><th>Match</th><th>Type</th><th>Status</th><th></th></tr>
+    </thead>
+    <tbody id="routesBody">
+      <tr id="noRoutes"><td colspan="5" style="color:var(--dim);text-align:center;padding:1.5rem">No routes configured</td></tr>
+    </tbody>
+  </table>
+
+  <div class="route-form" id="routeForm">
+    <h3 id="formTitle">Add Route</h3>
+    <div class="route-form-grid">
+      <div class="form-group">
+        <label>Name</label>
+        <input id="routeName" placeholder="Mock Users API">
+      </div>
+      <div class="form-group">
+        <label>Path (supports :param patterns)</label>
+        <input id="routePath" placeholder="/api/users/:id">
+      </div>
+      <div class="form-group">
+        <label>Method</label>
+        <select id="routeMethod">
+          <option value="">Any</option>
+          <option>GET</option>
+          <option>POST</option>
+          <option>PUT</option>
+          <option>PATCH</option>
+          <option>DELETE</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Type</label>
+        <div class="route-type-toggle">
+          <label><input type="radio" name="routeType" value="script" checked> Script</label>
+          <label><input type="radio" name="routeType" value="static"> Static</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="route-conditional visible" id="scriptSection">
+      <div class="form-group">
+        <label>Script <span style="color:var(--dim);font-weight:normal">— receives (request, context), returns Response or value</span></label>
+        <textarea id="routeScript" class="code-editor" placeholder="// request = standard Request object
+// context = { params, query }
+//
+// Return a Response, object (→ JSON), or string (→ text):
+const { params } = context;
+return new Response(
+  JSON.stringify({ id: params.id, name: 'Mock User' }),
+  { headers: { 'content-type': 'application/json' } }
+);"></textarea>
+      </div>
+    </div>
+
+    <div class="route-conditional" id="staticSection">
+      <div class="archive-drop-zone" id="archiveDropZone">
+        <div class="archive-drop-icon">&#x1F4E6;</div>
+        <div class="archive-drop-text">Drag &amp; drop a .cbor archive here</div>
+        <div class="archive-drop-or">or</div>
+        <div class="btn-group" style="justify-content:center">
+          <button class="btn btn-secondary" type="button" id="archivePickerBtn">Choose .cbor File</button>
+          <button class="btn btn-secondary" type="button" id="browseDirectoryBtn">Browse Folder</button>
+        </div>
+        <input type="file" id="archiveFileInput" accept=".cbor" style="display:none">
+      </div>
+      <div id="archiveInfo" style="display:none">
+        <div class="archive-meta">
+          <span class="archive-filename" id="archiveFilename"></span>
+          <span class="archive-stat" id="archiveFileCount"></span>
+          <span class="archive-stat" id="archiveTotalSize"></span>
+          <button class="archive-remove" id="archiveRemoveBtn" type="button">Remove</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="btn-group">
+      <button class="btn btn-primary" id="saveRouteBtn">Add Route</button>
+      <button class="btn btn-secondary" id="cancelEditBtn" style="display:none">Cancel</button>
+      <button class="btn btn-secondary" id="exportArchiveBtn" style="display:none">Export Archive</button>
+      <button class="btn btn-secondary" id="previewBtn">Preview (Browser)</button>
+      <button class="btn btn-secondary" id="testRouteBtn">Test (Server)</button>
+    </div>
+    <div id="routeMsg" style="margin-top:0.75rem"></div>
+    <div id="testResult" style="margin-top:0.75rem"></div>
+  </div>
+</div>
+
+<script type="module">
+import { PrismClient } from './shared/prism-client.mjs';
+
+const basePath = new URL('.', location.href).pathname.replace(/\/$/, '');
+const client = new PrismClient(basePath);
+
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+// ── Init ─────────────────────────────────────────────────────────
+async function init() {
+  try {
+    const health = await client.fetchHealth();
+    statusDot.classList.add('connected');
+    statusText.textContent = 'Live';
+    if (health.mode) document.body.dataset.mode = health.mode;
+  } catch {
+    statusDot.classList.remove('connected');
+    statusText.textContent = 'Offline';
+  }
+}
+init();
+
+// ── Type toggle ──────────────────────────────────────────────────
+const typeRadios = document.querySelectorAll('input[name="routeType"]');
+const scriptSection = document.getElementById('scriptSection');
+const staticSection = document.getElementById('staticSection');
+const testBtn = document.getElementById('testRouteBtn');
+const previewBtn = document.getElementById('previewBtn');
+const exportArchiveBtn = document.getElementById('exportArchiveBtn');
+
+typeRadios.forEach(r => r.addEventListener('change', () => {
+  const isScript = document.querySelector('input[name="routeType"]:checked').value === 'script';
+  scriptSection.classList.toggle('visible', isScript);
+  staticSection.classList.toggle('visible', !isScript);
+  testBtn.style.display = isScript ? '' : 'none';
+  previewBtn.style.display = isScript ? '' : 'none';
+}));
+
+// ── Archive upload state ─────────────────────────────────────────
+let uploadedArchive = null; // { mode, archive?, archiveData?, fileCount, totalSize }
+
+const dropZone = document.getElementById('archiveDropZone');
+const fileInput = document.getElementById('archiveFileInput');
+const pickerBtn = document.getElementById('archivePickerBtn');
+const archiveInfo = document.getElementById('archiveInfo');
+
+pickerBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) uploadArchive(fileInput.files[0]);
+});
+
+dropZone.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  dropZone.classList.add('drag-over');
+});
+dropZone.addEventListener('dragleave', () => {
+  dropZone.classList.remove('drag-over');
+});
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) uploadArchive(file);
+});
+
+document.getElementById('archiveRemoveBtn').addEventListener('click', () => {
+  uploadedArchive = null;
+  dropZone.style.display = '';
+  archiveInfo.style.display = 'none';
+  fileInput.value = '';
+});
+
+async function uploadArchive(file) {
+  dropZone.style.display = 'none';
+  archiveInfo.style.display = 'none';
+  showMsg('routeMsg', 'Uploading archive...');
+
+  try {
+    const result = await client.uploadArchive(file);
+    if (result.error) {
+      showMsg('routeMsg', result.error, true);
+      dropZone.style.display = '';
+      return;
+    }
+    showUploadResult(result, file.name);
+  } catch (e) {
+    showMsg('routeMsg', e.message, true);
+    dropZone.style.display = '';
+  }
+}
+
+function showUploadResult(result, displayName) {
+  uploadedArchive = result;
+  document.getElementById('archiveFilename').textContent = displayName;
+  document.getElementById('archiveFileCount').textContent = result.fileCount + ' files';
+  document.getElementById('archiveTotalSize').textContent = formatBytes(result.totalSize);
+  dropZone.style.display = 'none';
+  archiveInfo.style.display = '';
+  showMsg('routeMsg', 'Uploaded (' + result.mode + ' mode, ' + result.fileCount + ' files)');
+}
+
+// ── Browse directory (File System Access API) ────────────────────
+const browseBtn = document.getElementById('browseDirectoryBtn');
+
+if (!('showDirectoryPicker' in window)) {
+  browseBtn.style.display = 'none';
+}
+
+async function readDirectoryHandle(dirHandle, basePath) {
+  const files = {};
+  for await (const [name, handle] of dirHandle) {
+    const path = basePath ? basePath + '/' + name : name;
+    if (handle.kind === 'file') {
+      const file = await handle.getFile();
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      files[path] = btoa(binary);
+    } else if (handle.kind === 'directory') {
+      Object.assign(files, await readDirectoryHandle(handle, path));
+    }
+  }
+  return files;
+}
+
+browseBtn.addEventListener('click', async () => {
+  let dirHandle;
+  try {
+    dirHandle = await window.showDirectoryPicker();
+  } catch {
+    return; // user cancelled
+  }
+
+  browseBtn.disabled = true;
+  browseBtn.textContent = 'Reading...';
+  showMsg('routeMsg', 'Reading directory...');
+
+  try {
+    const filesMap = await readDirectoryHandle(dirHandle, '');
+    const count = Object.keys(filesMap).length;
+    if (!count) {
+      showMsg('routeMsg', 'Directory is empty', true);
+      browseBtn.disabled = false;
+      browseBtn.textContent = 'Browse Folder';
+      return;
+    }
+
+    showMsg('routeMsg', 'Uploading ' + count + ' files...');
+    const result = await client.uploadFiles(filesMap, dirHandle.name);
+    if (result.error) {
+      showMsg('routeMsg', result.error, true);
+      browseBtn.disabled = false;
+      browseBtn.textContent = 'Browse Folder';
+      return;
+    }
+
+    showUploadResult(result, dirHandle.name);
+  } catch (e) {
+    showMsg('routeMsg', e.message, true);
+  }
+
+  browseBtn.disabled = false;
+  browseBtn.textContent = 'Browse Folder';
+});
+
+// ── Load routes ──────────────────────────────────────────────────
+async function loadRoutes() {
+  try {
+    const routes = await client.getRoutes();
+    const tbody = document.getElementById('routesBody');
+    if (!routes.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--dim);text-align:center;padding:1.5rem">No routes configured</td></tr>';
+      return;
+    }
+    tbody.innerHTML = routes.map((r, i) => {
+      const matchStr = (r.match.method ? r.match.method + ' ' : '') + r.match.path;
+      const typeBadge = r.type === 'script'
+        ? '<span class="route-type-badge badge-script">Script</span>'
+        : '<span class="route-type-badge badge-static">Static</span>';
+
+      let statusBadge = '';
+      if (r.type === 'static') {
+        if (r._loaded) {
+          statusBadge = '<span class="route-status-badge status-loaded">Loaded</span>';
+        } else {
+          const errTitle = r._error ? esc(r._error) : 'No files loaded';
+          statusBadge = '<span class="route-status-badge status-error" title="' + errTitle + '">Not loaded</span>';
+        }
+      }
+
+      return `<tr>
+        <td>${esc(r.name || '(unnamed)')}</td>
+        <td><code style="color:var(--accent2);font-size:0.7rem">${esc(matchStr)}</code></td>
+        <td>${typeBadge}</td>
+        <td>${statusBadge}</td>
+        <td>
+          <button class="btn btn-secondary" onclick="editRoute(${i})" style="padding:0.2rem 0.5rem;font-size:0.65rem">Edit</button>
+          <button class="btn btn-danger" onclick="deleteRoute(${i})" style="padding:0.2rem 0.5rem;font-size:0.65rem">Delete</button>
+        </td>
+      </tr>`;
+    }).join('');
+  } catch {}
+}
+
+// ── Edit mode ────────────────────────────────────────────────────
+let editingIndex = -1;
+const formTitle = document.getElementById('formTitle');
+const saveBtn = document.getElementById('saveRouteBtn');
+const cancelBtn = document.getElementById('cancelEditBtn');
+
+function clearForm() {
+  document.getElementById('routeName').value = '';
+  document.getElementById('routePath').value = '';
+  document.getElementById('routeMethod').value = '';
+  document.getElementById('routeScript').value = '';
+  document.querySelector('input[name="routeType"][value="script"]').checked = true;
+  scriptSection.classList.add('visible');
+  staticSection.classList.remove('visible');
+  dropZone.style.display = '';
+  archiveInfo.style.display = 'none';
+  uploadedArchive = null;
+  fileInput.value = '';
+  testBtn.style.display = '';
+  previewBtn.style.display = '';
+  exportArchiveBtn.style.display = 'none';
+  editingIndex = -1;
+  formTitle.textContent = 'Add Route';
+  saveBtn.textContent = 'Add Route';
+  cancelBtn.style.display = 'none';
+}
+
+window.editRoute = async function(index) {
+  try {
+    const routes = await client.getRoutes();
+    const r = routes[index];
+    if (!r) return;
+    editingIndex = index;
+    document.getElementById('routeName').value = r.name || '';
+    document.getElementById('routePath').value = r.match?.path || '';
+    document.getElementById('routeMethod').value = r.match?.method || '';
+    if (r.type === 'static') {
+      document.querySelector('input[name="routeType"][value="static"]').checked = true;
+      scriptSection.classList.remove('visible');
+      staticSection.classList.add('visible');
+      testBtn.style.display = 'none';
+      previewBtn.style.display = 'none';
+      exportArchiveBtn.style.display = '';
+
+      if (r.archive || r.archiveData) {
+        dropZone.style.display = 'none';
+        archiveInfo.style.display = '';
+        document.getElementById('archiveFilename').textContent = r.archive ? r.archive.split('/').pop() : '(inline archive)';
+        document.getElementById('archiveFileCount').textContent = '';
+        document.getElementById('archiveTotalSize').textContent = '';
+        uploadedArchive = {
+          mode: r.archive ? 'file' : 'inline',
+          archive: r.archive,
+          archiveData: r.archiveData,
+        };
+      } else if (r.directory) {
+        // Legacy directory-based route — show as needing re-upload
+        dropZone.style.display = '';
+        archiveInfo.style.display = 'none';
+        uploadedArchive = null;
+      } else {
+        dropZone.style.display = '';
+        archiveInfo.style.display = 'none';
+        uploadedArchive = null;
+      }
+    } else {
+      document.querySelector('input[name="routeType"][value="script"]').checked = true;
+      scriptSection.classList.add('visible');
+      staticSection.classList.remove('visible');
+      testBtn.style.display = '';
+      previewBtn.style.display = '';
+      exportArchiveBtn.style.display = 'none';
+      document.getElementById('routeScript').value = r.script || '';
+    }
+    formTitle.textContent = 'Edit Route';
+    saveBtn.textContent = 'Update Route';
+    cancelBtn.style.display = '';
+    document.getElementById('routeForm').scrollIntoView({ behavior: 'smooth' });
+  } catch {}
+};
+
+cancelBtn.addEventListener('click', clearForm);
+
+window.deleteRoute = async function(index) {
+  await client.deleteRoute(index);
+  loadRoutes();
+};
+
+// ── Export archive ────────────────────────────────────────────────
+exportArchiveBtn.addEventListener('click', () => {
+  if (editingIndex < 0) return;
+  window.open(client.exportArchiveUrl(editingIndex), '_blank');
+});
+
+// ── Save route ───────────────────────────────────────────────────
+saveBtn.addEventListener('click', async () => {
+  const path = document.getElementById('routePath').value.trim();
+  if (!path) {
+    showMsg('routeMsg', 'Path is required', true);
+    return;
+  }
+
+  const type = document.querySelector('input[name="routeType"]:checked').value;
+
+  if (type === 'script' && !document.getElementById('routeScript').value.trim()) {
+    showMsg('routeMsg', 'Script is required for script routes', true);
+    return;
+  }
+
+  if (type === 'static' && !uploadedArchive) {
+    showMsg('routeMsg', 'Upload files or an archive first', true);
+    return;
+  }
+
+  const route = {
+    name: document.getElementById('routeName').value.trim() || undefined,
+    match: {
+      path,
+      method: document.getElementById('routeMethod').value || undefined,
+    },
+    type,
+  };
+
+  if (type === 'script') {
+    route.script = document.getElementById('routeScript').value;
+  } else if (uploadedArchive) {
+    if (uploadedArchive.mode === 'inline') {
+      route.archiveData = uploadedArchive.archiveData;
+    } else {
+      route.archive = uploadedArchive.archive;
+    }
+  }
+
+  try {
+    if (editingIndex >= 0) {
+      await client.updateRoute(editingIndex, route);
+      showMsg('routeMsg', 'Route updated');
+    } else {
+      await client.addRoute(route);
+      showMsg('routeMsg', 'Route added');
+    }
+    clearForm();
+    loadRoutes();
+  } catch (e) {
+    showMsg('routeMsg', e.message, true);
+  }
+});
+
+// ── Test script ──────────────────────────────────────────────────
+testBtn.addEventListener('click', async () => {
+  const script = document.getElementById('routeScript').value.trim();
+  if (!script) {
+    showMsg('testResult', 'Script is empty', true);
+    return;
+  }
+
+  const path = document.getElementById('routePath').value.trim() || '/test';
+  const method = document.getElementById('routeMethod').value || 'GET';
+
+  testBtn.disabled = true;
+  testBtn.textContent = 'Testing...';
+
+  try {
+    const result = await client.testRoute({ script, method, path });
+    let html = `<div class="msg msg-success">Status: ${result.status}</div>`;
+    if (result.body) {
+      html += `<div class="code-block" style="margin-top:0.5rem;max-height:200px"><pre>${esc(result.body)}</pre></div>`;
+    }
+    if (result.logs) {
+      html += `<div style="margin-top:0.5rem;font-size:0.7rem;color:var(--dim)">Console: ${esc(result.logs)}</div>`;
+    }
+    document.getElementById('testResult').innerHTML = html;
+  } catch (e) {
+    showMsg('testResult', e.message, true);
+  }
+
+  testBtn.disabled = false;
+  testBtn.textContent = 'Test Script';
+});
+
+// ── Preview (browser-side) ──────────────────────────────────
+previewBtn.addEventListener('click', async () => {
+  const script = document.getElementById('routeScript').value.trim();
+  if (!script) { showMsg('testResult', 'Script is empty', true); return; }
+
+  const path = document.getElementById('routePath').value.trim() || '/test';
+  const method = document.getElementById('routeMethod').value || 'GET';
+
+  previewBtn.disabled = true;
+  previewBtn.textContent = 'Running...';
+
+  try {
+    const mockUrl = new URL(path, location.origin);
+    const mockRequest = new Request(mockUrl, { method });
+
+    const routePath = document.getElementById('routePath').value.trim() || '/';
+    const segments = routePath.split('/');
+    const pathSegments = path.split('/');
+    const params = {};
+    segments.forEach((seg, i) => {
+      if (seg.startsWith(':')) params[seg.slice(1)] = pathSegments[i] || '';
+    });
+    const query = Object.fromEntries(mockUrl.searchParams);
+    const context = { params, query };
+
+    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    const fn = new AsyncFunction('request', 'context', script);
+    const result = await fn(mockRequest, context);
+
+    let response;
+    if (result instanceof Response) response = result;
+    else if (typeof result === 'string') response = new Response(result, { headers: { 'content-type': 'text/plain' } });
+    else if (result && typeof result === 'object') {
+      if (result.status || result.headers || result.body) {
+        response = new Response(
+          typeof result.body === 'string' ? result.body : JSON.stringify(result.body),
+          { status: result.status || 200, headers: result.headers || {} }
+        );
+      } else {
+        response = new Response(JSON.stringify(result), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+    } else {
+      response = new Response(null, { status: 204 });
+    }
+
+    const body = await response.text();
+    let html = `<div class="msg msg-success">Browser preview — Status: ${response.status}</div>`;
+    if (body) html += `<div class="code-block" style="margin-top:0.5rem;max-height:200px"><pre>${esc(body)}</pre></div>`;
+    document.getElementById('testResult').innerHTML = html;
+  } catch (e) {
+    showMsg('testResult', e.message, true);
+  }
+
+  previewBtn.disabled = false;
+  previewBtn.textContent = 'Preview (Browser)';
+});
+
+// ── Helpers ──────────────────────────────────────────────────────
+function showMsg(id, text, isError = false) {
+  const el = document.getElementById(id);
+  el.innerHTML = `<div class="msg ${isError ? 'msg-error' : 'msg-success'}">${esc(text)}</div>`;
+  setTimeout(() => el.innerHTML = '', 4000);
+}
+
+loadRoutes();
+</script>
+</body>
+</html>
