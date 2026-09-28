@@ -45,6 +45,17 @@ for lestack's other packages. Never published under any other name.
   paths (`--target` mode and a custom `"type": "proxy"` route) by setting
   the forwarded `Host` header to the upstream's own host. Regression tests
   added in `test/inspector.test.mjs`. See AGENTS.md's gotchas.
+- **Custom route matching was not stripping the query string from the
+  path being matched against**, so `matchRoute`'s regex saw
+  `pathname + search` instead of just `pathname`: a static route pattern
+  (no `:param`) failed to match at all whenever the request had a query
+  string, silently falling through to capture/proxy behavior; a `:param`
+  pattern instead silently absorbed the query string into the last
+  param's value (`GET /greet/world?loud=1` -> `params.name ===
+  "world?loud=1"`). Pre-existing -- present in the original `lestack`
+  source unchanged. `matchRoute` now strips the query string itself
+  before matching. Regression tests for both cases added in
+  `test/inspector.test.mjs`.
 
 ### Added
 
@@ -52,9 +63,9 @@ for lestack's other packages. Never published under any other name.
   `createInspector()`'s router directly (in-process `Request`s, no real
   network bind or `~/.prism` disk writes). Covers the dashboard, echo
   capture, `/health`, `/history`, a custom script route via andbox
-  (params, `console.log` capture, error-to-500), and a regression test
-  documenting the known query-string route-matching bug (see AGENTS.md).
-  A first pass, not full coverage — see AGENTS.md's Non-goals.
+  (params, `console.log` capture, error-to-500), and the two
+  query-string/Host-header bug fixes above. A first pass, not full
+  coverage — see AGENTS.md's Non-goals.
 
 ### Fixed (upstream, while porting)
 

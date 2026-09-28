@@ -233,10 +233,20 @@ export const createInspector = async (options = {}) => {
   }
 
   const matchRoute = (path, method) => {
+    // Route patterns (route.match.path) are always pure paths, never
+    // "?query"-bearing -- callers may pass a path+search string (the
+    // capture feed's own display-oriented entry.path does), so strip any
+    // query string before matching rather than requiring every caller to
+    // pre-clean its input. Previously this leaked into the match itself:
+    // for a static pattern, a trailing "?..." meant compilePath's regex
+    // never matched at all (silently falling through to capture/proxy
+    // behavior); for a `:param` pattern, "?..." got silently absorbed into
+    // the last param's value instead of being matched or rejected.
+    const pathOnly = path.split("?")[0];
     for (const route of routes) {
       if (route.match.method && route.match.method !== method) continue;
       const { regex, keys } = compilePath(route.match.path);
-      const m = path.match(regex);
+      const m = pathOnly.match(regex);
       if (m) {
         const params = {};
         keys.forEach((key, i) => { params[key] = m[i + 1]; });

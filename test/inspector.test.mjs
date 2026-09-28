@@ -69,15 +69,12 @@ test("custom script route runs via @johnhenry/andbox and sees context.params", a
   assert.deepEqual(data, { greeting: "hi world" });
 });
 
-// Regression test for a known, pre-existing limitation (present in the
-// original lestack source unchanged -- see AGENTS.md's gotchas) rather
-// than a spec for desired behavior: `matchRoute` is called with the query
-// string still attached to the path. For a `:param` segment, whose regex
-// is `([^/]+)`, that string gets silently absorbed into the last param's
-// value instead of being matched at all. If this test ever starts
-// failing because the bug got fixed, update AGENTS.md and this test
-// together, not just one.
-test("KNOWN BUG: a query string leaks into a trailing :param's value instead of being stripped", async () => {
+// Regression test for a bug that used to be here (present in the original
+// lestack source unchanged, fixed in matchRoute()): a query string on the
+// incoming path leaked into a trailing :param's value instead of being
+// stripped before matching, since a `:param` segment's regex (`([^/]+)`)
+// happily absorbs a "?..." suffix.
+test("a query string does not leak into a trailing :param's value", async () => {
   const router = await createInspector();
   await router(
     new Request("http://localhost/routes", {
@@ -95,7 +92,31 @@ test("KNOWN BUG: a query string leaks into a trailing :param's value instead of 
     new Request("http://localhost/greet/world?loud=1")
   );
   const data = await response.json();
-  assert.equal(data.name, "world?loud=1"); // should be "world"
+  assert.equal(data.name, "world");
+});
+
+// Companion case: a query string on a path with no :params used to prevent
+// the route from matching at all (compilePath's regex for a static pattern
+// has no provision for a trailing "?...", so the whole match failed and the
+// request silently fell through to capture/proxy behavior instead).
+test("a query string does not prevent a static (no-param) route from matching", async () => {
+  const router = await createInspector();
+  await router(
+    new Request("http://localhost/routes", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        match: { path: "/search" },
+        type: "script",
+        script: "const { query } = context; return { q: query.q };",
+      }),
+    })
+  );
+
+  const response = await router(new Request("http://localhost/search?q=hello"));
+  assert.equal(response.status, 200);
+  const data = await response.json();
+  assert.equal(data.q, "hello");
 });
 
 test("custom script route's console.log output is captured in the entry's routeLogs", async () => {

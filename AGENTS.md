@@ -36,16 +36,21 @@ treating manual curl-ing as the only verification going forward.
   matching first, over a corrected route registered later, because
   `matchRoute` is first-match-wins and `routes.push` only appends). Always
   `rm -f ~/.prism/routes.json ~/.prism/history.jsonl` before a clean test.
-- **Custom route matching does not strip the query string from the path
-  being matched against.** `matchRoute(rawPath, method)` is called with
-  `rawPath` = `url.pathname + url.search`, and `compilePath`'s regex has no
-  provision for a trailing `?...` — a request like `GET /users?id=1` will
-  NOT match a registered route for `/users`, silently falling through to
-  capture/proxy behavior instead. This predates the `@johnhenry` port
-  (present in the original `lestack` source unchanged) — not something
-  introduced during migration, but a real, live limitation worth fixing
-  properly (strip `url.search` before matching) rather than working around
-  in scripts.
+- **FIXED, but easy to reintroduce: custom route matching used to not
+  strip the query string from the path being matched against.**
+  `matchRoute(rawPath, method)` is called with `rawPath` =
+  `url.pathname + url.search` (kept that way deliberately -- `entry.path`
+  is also used for display in the capture feed, where showing the query
+  string is useful), but `compilePath`'s regex has no provision for a
+  trailing `?...`: for a static pattern the match failed outright
+  (silently falling through to capture/proxy behavior); for a `:param`
+  pattern, the query string got silently absorbed into the last param's
+  value instead. `matchRoute` now strips the query string itself
+  (`path.split("?")[0]`) before matching, rather than requiring
+  `rawPath`'s one call site to pre-clean it -- if you add a new call site
+  or change how routes are matched, keep that stripping (or move it to the
+  call site, but don't drop it). Regression tests for both cases (static
+  and `:param`) are in `test/inspector.test.mjs`.
 - **FIXED, but easy to reintroduce: proxy mode used to forward the client's
   own `Host` header to the upstream unfiltered**, breaking any HTTPS target
   whose certificate doesn't cover whatever value the client happened to
@@ -101,11 +106,6 @@ treating manual curl-ing as the only verification going forward.
   `inspector.mjs`'s ~1100 lines (proxy mode, rewrite rules, replay/import,
   WebSocket proxying, and static/archive-backed routes have no tests yet).
   Growing it is real, ongoing work, not a one-time backfill to schedule.
-- Fixing the query-string route-matching gap noted above is real, scoped,
-  separate follow-up work — not fixed as part of the initial port to avoid
-  changing route-matching behavior beyond what was needed to get the port
-  itself correct. `test/inspector.test.mjs` has a regression test
-  documenting the current (buggy) behavior explicitly for this reason.
 
 ## Releases
 
