@@ -42,11 +42,11 @@
     "node": ">=26.0.0"
   },
   "dependencies": {
-    "@johnhenry/leserve": "^0.0.1",
-    "@johnhenry/letterpress": "^0.0.3",
+    "@johnhenry/leserve": "^0.1.0",
+    "@johnhenry/letterpress": "^0.1.0",
     "@johnhenry/signalle": "^0.1.2",
     "@johnhenry/http-converter": "^0.0.1",
-    "@johnhenry/http-fields": "^0.0.0",
+    "@johnhenry/http-fields": "^0.1.0",
     "@johnhenry/packfile": "^0.0.1",
     "@johnhenry/andbox": "^0.0.3",
     "@johnhenry/webwire": "^0.0.0",
